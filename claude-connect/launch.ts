@@ -1,17 +1,14 @@
-import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import * as p from "@clack/prompts";
 
+import { commandExists, IS_WINDOWS, killTree, spawnCommand } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { apiFetch } from "./fetch";
 import { logger } from "./logger";
 import type { SharerAccount } from "./types";
-
-const execFileAsync = promisify(execFile);
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
 
@@ -75,10 +72,7 @@ export async function ensureCredentials() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export async function checkClaudeInstalled(): Promise<boolean> {
-  const which = process.platform === "win32" ? "where" : "which";
-  return execFileAsync(which, ["claude"])
-    .then(() => true)
-    .catch(() => false);
+  return commandExists("claude");
 }
 
 export async function sessionPost(
@@ -187,7 +181,8 @@ export async function launchClaude(
   parsedProxy.password = encodeURIComponent(meta.proxyPass);
   const httpProxyUrl = parsedProxy.toString();
 
-  const child = spawn("claude", claudeArgs, {
+  // spawnCommand resolves the .cmd shim npm installs on Windows
+  const child = await spawnCommand("claude", claudeArgs, {
     stdio: "inherit",
     env: {
       ...process.env,
@@ -246,6 +241,16 @@ export async function launchClaude(
     process.exit(1);
   });
 
-  process.on("SIGINT", () => child.kill("SIGINT"));
-  process.on("SIGTERM", () => child.kill("SIGTERM"));
+  // Windows delivers Ctrl+C to every process attached to the console, so claude
+  // has already been interrupted and gets to shut down on its own terms; only a
+  // second interrupt kills the tree (claude runs as a grandchild of cmd.exe there).
+  let interrupts = 0;
+  process.on("SIGINT", () => {
+    if (!IS_WINDOWS) {
+      child.kill("SIGINT");
+      return;
+    }
+    if (++interrupts > 1) killTree(child, "SIGKILL");
+  });
+  process.on("SIGTERM", () => killTree(child, "SIGTERM"));
 }

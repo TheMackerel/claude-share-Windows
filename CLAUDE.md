@@ -20,7 +20,9 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 
 **MITM proxy** (`proxy/mitm.ts`): intercepts TLS only for `INTERCEPT_DOMAINS` (`api.anthropic.com`, `platform.anthropic.com`, `platform.claude.com`, `mcp-proxy.anthropic.com`). All other CONNECT requests are transparent TCP-piped — never touch the cert or plaintext.
 
-**Token injection**: sharer's OAuth token is read from macOS Keychain at startup and injected per-request inside the MITM. Never written to disk, never sent to receiver.
+**Token injection**: sharer's OAuth token is read at startup through `shared/platforms/` — macOS Keychain on darwin, `~/.claude/.credentials.json` on Linux and Windows (`CLAUDE_CONFIG_DIR` relocates it) — and injected per-request inside the MITM. Never written to disk, never sent to receiver.
+
+**Platform support**: darwin, linux, win32. Anything OS-specific belongs in one of two places — `shared/platforms/` (credential store, machine name; `resolver.ts` picks the implementation and exits on anything else) or `shared/exec.ts` (PATH lookup, spawning, process trees). Don't reach for `execFile("which"|"lsof"|"kill", …)` directly; on Windows those don't exist and npm-installed CLIs (`claude`, `npm`, …) are `.cmd` shims that CreateProcess refuses to run — `spawnCommand`/`execCommand` wrap them in cmd.exe with the argument escaping that requires.
 
 **Pairing**: connect URL format is `http://<host>/connect/<pairingCode>`. The pairingCode is `base58(32-byte session key)` — it's also the private decryption key. Only the first 5 chars are sent over HTTP for session lookup; the receiver decrypts the response blob locally using the full key from the URL.
 
@@ -39,8 +41,12 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 `~/.claude-share/connections/<machineId>.json` — pruned on startup if `sharedUntil` is past.  
 `~/.claude-share/config.json` — device name.
 
+(`%USERPROFILE%\.claude-share\` on Windows — `os.homedir()` throughout, so no separate path handling.)
+
 ## Known quirks
 
 - `ensureBore()` must run **before** any `p.intro()`/`p.select()` calls. clack's `p.confirm()` tears down stdin in a way ink can't recover from if it runs after other prompts.
 - `--share <url>` and `--share=<url>` are both supported in the receiver.
 - bore doesn't set `x-forwarded-for`, so all bore requests arrive as `ip = "unknown"`.
+- On Windows the console delivers Ctrl+C to every attached process, so `claude` is already interrupted by the time the receiver's SIGINT handler runs — it kills the process tree only on a second interrupt.
+- `netstat -ano` is parsed without `-p tcp`: a dual-stack listener is reported under TCPv6, which the filter drops. Listening rows are identified by foreign port `0`, since the state column is localized.

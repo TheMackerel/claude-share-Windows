@@ -65,6 +65,9 @@ function copyToClipboard(text: string): void {
   if (process.platform === "darwin") {
     cmd = "pbcopy";
     args = [];
+  } else if (process.platform === "win32") {
+    cmd = "clip";
+    args = [];
   } else if (process.env.WAYLAND_DISPLAY) {
     cmd = "wl-copy";
     args = [];

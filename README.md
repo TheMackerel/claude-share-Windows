@@ -21,7 +21,7 @@ claude (CLI)                        claude-share
                                       └─ bore tunnel (public URL via bore.pub)
 ```
 
-- The sharer's OAuth token is read from the macOS Keychain and injected per-request inside the MITM proxy — it is never written to disk or sent to the receiver.
+- The sharer's OAuth token is read from the platform credential store and injected per-request inside the MITM proxy — it is never written to disk or sent to the receiver.
 - The receiver installs a temporary CA cert (valid only for the session) so the MITM can intercept Anthropic traffic. Non-Anthropic domains pass through as an opaque TCP tunnel — never inspected.
 - Pairing uses a one-time code. Once paired, credentials are saved so reconnecting skips the pairing step.
 
@@ -45,7 +45,7 @@ This installs both `claude-share` and `claude-connect` binaries.
 claude-share
 ```
 
-Requires [bore](https://github.com/ekzhang/bore) for internet sharing (`brew install bore-cli`). If bore is not installed you'll be prompted — decline to share on LAN only.
+Requires [bore](https://github.com/ekzhang/bore) for internet sharing. If bore is not installed, claude-share downloads it for you on Linux and Windows, and uses `brew install bore-cli` on macOS — decline to share on LAN only.
 
 The TUI shows connection URLs. Share the **Public** URL with receivers over the internet, or the **LAN** URL for local network.
 
@@ -79,8 +79,9 @@ npx -p @0xpv/claude-share claude-connect --share <connect-url>
 
 ## Requirements
 
+- **macOS, Linux or Windows** on both machines
 - **Node.js 18+** on both machines
-- **bore** (`brew install bore-cli`) on the sharer machine for internet sharing
+- **bore** on the sharer machine for internet sharing — installed automatically on Linux and Windows, `brew install bore-cli` on macOS
 - The sharer must be logged in to Claude Code (`claude login`)
 - The receiver must have Claude Code installed
 
@@ -88,7 +89,7 @@ npx -p @0xpv/claude-share claude-connect --share <connect-url>
 
 ## Security model
 
-- The sharer's OAuth token is read from the macOS Keychain and injected into requests in-memory. It is never transmitted to the receiver.
+- The sharer's OAuth token is read from wherever Claude Code keeps it — the macOS Keychain, or `~/.claude/.credentials.json` (`%USERPROFILE%\.claude\.credentials.json` on Windows) — and injected into requests in-memory. It is never transmitted to the receiver.
 - Only these Anthropic endpoints are proxied: `POST /v1/messages`, `GET /v1/models`, `/api/hello`, and OAuth flows on `platform.anthropic.com` / `platform.claude.com`.
 - File upload (`/v1/files`), fine-tuning, and assistants endpoints are blocked.
 - All non-Anthropic HTTPS traffic passes through as an opaque TCP tunnel — the proxy never sees the contents.

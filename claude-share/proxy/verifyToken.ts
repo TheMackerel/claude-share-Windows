@@ -1,24 +1,38 @@
-import { execFile } from "node:child_process";
-
 import * as p from "@clack/prompts";
 
+import { killTree, spawnCommand } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { logger } from "../logger";
 import { initToken } from "./token";
 
-function spawnClaudeForRefresh(): Promise<void> {
+async function spawnClaudeForRefresh(): Promise<void> {
+  // spawnCommand handles the .cmd shim npm installs on Windows
+  const child = await spawnCommand("claude", ["-p", "HI"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
   return new Promise((resolve, reject) => {
-    const child = execFile("claude", ["-p", "HI"], { timeout: 60_000 }, (err) => {
-      if (err?.killed) {
-        reject(new Error("Claude process timed out after 60s"));
-      } else {
-        // Non-zero exit is acceptable — the OAuth refresh can succeed even if the
-        // prompt itself fails (e.g. rate limit, no Pro plan, etc.).
-        resolve();
-      }
-    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child, "SIGKILL");
+    }, 60_000);
+
     child.stdout?.resume();
     child.stderr?.resume();
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    // Non-zero exit is acceptable — the OAuth refresh can succeed even if the
+    // prompt itself fails (e.g. rate limit, no Pro plan, etc.).
+    child.on("close", () => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error("Claude process timed out after 60s"));
+      else resolve();
+    });
   });
 }
 

@@ -110,6 +110,44 @@ async function getSystemName(): Promise<string> {
   return platform().getSystemName();
 }
 
+// Port owner lookup — lsof/kill on POSIX, netstat/taskkill on Windows.
+async function findPidsOnPort(port: number): Promise<string[]> {
+  if (process.platform === "win32") {
+    // No -p filter: a dual-stack listener shows up under TCPv6, which
+    // `netstat -p tcp` leaves out. UDP rows have no state column and never match.
+    const { stdout } = await execFileAsync("netstat", ["-ano"]).catch(() => ({
+      stdout: "",
+    }));
+    const pids = new Set<string>();
+    for (const line of stdout.split(/\r?\n/)) {
+      // proto | local addr | foreign addr | state | pid — a listening socket has
+      // foreign port 0, which is locale-independent (the state column is not).
+      const m = line
+        .trim()
+        .match(/^TCP\s+(\S+):(\d+)\s+(\S+):(\d+)\s+\S+\s+(\d+)$/i);
+      if (m && m[2] === String(port) && m[4] === "0" && m[5] !== "0") {
+        pids.add(m[5]);
+      }
+    }
+    return [...pids];
+  }
+
+  const { stdout } = await execFileAsync("lsof", ["-ti", `tcp:${port}`]).catch(
+    () => ({ stdout: "" }),
+  );
+  return stdout.trim().split("\n").filter(Boolean);
+}
+
+async function killPids(pids: string[]): Promise<void> {
+  if (process.platform === "win32") {
+    for (const pid of pids) {
+      await execFileAsync("taskkill", ["/PID", pid, "/T", "/F"]).catch(() => {});
+    }
+    return;
+  }
+  await execFileAsync("kill", ["-9", ...pids]);
+}
+
 function getLanIp(): string | null {
   for (const ifaces of Object.values(os.networkInterfaces())) {
     for (const iface of ifaces ?? []) {
@@ -368,16 +406,12 @@ async function main() {
       urls.lan = lanUrl;
       p.log.info(`Using port ${PORT} instead.`);
     } else {
-      const { stdout } = await execFileAsync("lsof", [
-        "-ti",
-        `tcp:${PORT}`,
-      ]).catch(() => ({ stdout: "" }));
-      const pids = stdout.trim().split("\n").filter(Boolean);
+      const pids = await findPidsOnPort(PORT);
       if (pids.length === 0) {
         p.log.error(`Could not find process on port ${PORT}.`);
         process.exit(1);
       }
-      await execFileAsync("kill", ["-9", ...pids]);
+      await killPids(pids);
       p.log.info(`Killed process on port ${PORT}, retrying…`);
     }
 
