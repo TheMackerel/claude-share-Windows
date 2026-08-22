@@ -1,6 +1,8 @@
-# claude-share
+# claude-share-Windows
 
-Securely share your Claude Code subscription with others.
+Securely share your Claude Code subscription with others — **Windows port** of
+[prathamVaidya/claude-share](https://github.com/prathamVaidya/claude-share), which supports macOS and Linux only.
+Runs on Windows, macOS and Linux.
 
 One machine runs **claude-share** to expose its Claude credentials through a local proxy. Other machines run **claude-connect** to connect and use Claude Code as if they had their own subscription.
 
@@ -29,11 +31,67 @@ claude (CLI)                        claude-share
 
 ## Install
 
-```bash
-npm install -g @0xpv/claude-share
+This fork is **not published to npm**. `npm install -g @0xpv/claude-share` installs the upstream
+package instead, which exits with `Unsupported platform: "win32"`. Build from source:
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/TheFishEngineer/claude-share-Windows.git
+cd claude-share-Windows
+npm install -g bun      # skip if bun is already installed
+bun install
+bun run build
+npm install -g .
 ```
 
-This installs both `claude-share` and `claude-connect` binaries.
+### macOS / Linux
+
+```bash
+git clone https://github.com/TheFishEngineer/claude-share-Windows.git
+cd claude-share-Windows
+npm install -g bun      # skip if bun is already installed
+bun install
+bun run build
+npm install -g .
+```
+
+That puts both `claude-share` and `claude-connect` on your PATH. Verify:
+
+```bash
+claude-share --version
+claude-connect --version
+```
+
+Both should print `1.3.2`.
+
+### Things to know
+
+- `npm install -g .` **links** the commands to this folder — don't move or delete the clone, and stay
+  on a branch that has the Windows port (`main` does). After `git pull`, `bun run build` is enough;
+  there's no need to re-run `npm install -g .`.
+- Windows: npm also creates `.ps1` shims. If PowerShell answers *"running scripts is disabled on this
+  system"*, either call `claude-share.cmd` / `claude-connect.cmd`, or allow local scripts once with
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+- Windows: no administrator rights are needed. The session CA cert is written to a temp file and handed
+  to `claude` through `NODE_EXTRA_CA_CERTS` — nothing is added to the Windows certificate store.
+- Windows, sharer only: Defender may prompt to unblock the listening port, and SmartScreen may flag the
+  automatic `bore` download from GitHub.
+
+---
+
+## Updating
+
+```bash
+git pull
+bun install
+bun run build
+```
+
+> **Heads up:** at startup both commands check npm for a newer `@0xpv/claude-share` and auto-upgrade to
+> it — which would replace this Windows build with the upstream package that has no Windows support.
+> npm's latest (`1.3.2`) currently matches this fork, so nothing happens; if it ever does, reinstall with
+> `npm install -g .` from this folder.
 
 ---
 
@@ -65,22 +123,28 @@ The receiver configures Claude Code to route through the proxy and installs the 
 
 ---
 
-## One-time use (npx)
+## Run without installing globally
+
+Skip `npm install -g .` and run straight from the clone:
 
 ```bash
 # Sharer
-npx @0xpv/claude-share
+bun claude-share/index.ts
 
 # Receiver
-npx -p @0xpv/claude-share claude-connect --share <connect-url>
+bun claude-connect/index.ts --share <connect-url>
 ```
+
+`npx @0xpv/claude-share` is **not** an option for this fork — npx fetches the upstream package, which
+has no Windows support.
 
 ---
 
 ## Requirements
 
 - **macOS, Linux or Windows** on both machines
-- **Node.js 18+** on both machines
+- **Node.js 18+** and **npm** on both machines
+- **git** and **bun** to build from source (`npm install -g bun`)
 - **bore** on the sharer machine for internet sharing — installed automatically on Linux and Windows, `brew install bore-cli` on macOS
 - The sharer must be logged in to Claude Code (`claude login`)
 - The receiver must have Claude Code installed
