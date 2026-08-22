@@ -6,9 +6,12 @@ const boreServer = process.env.BORE_SERVER || "bore.pub";
 const borePassword = process.env.BORE_PASSWORD || "";
 
 function build(entry: string, outfile: string, extraArgs: string[] = []) {
+  // `bun` in PATH can be an npm .cmd shim (Windows); Bun.spawnSync refuses to pass
+  // arguments containing cmd.exe special characters to it. process.execPath is the
+  // bun binary running this script.
   const result = Bun.spawnSync(
     [
-      "bun", "build", entry,
+      process.execPath, "build", entry,
       "--outfile", outfile,
       "--target", "node",
       "--production",
