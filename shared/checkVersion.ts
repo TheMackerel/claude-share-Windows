@@ -3,12 +3,17 @@ import os from "node:os";
 import path from "node:path";
 import * as p from "@clack/prompts";
 
-import { commandExists, execCommand } from "./exec";
 import pkg from "../package.json";
 
+// This fork is installed from source, never from npm: the package published under
+// pkg.name is upstream's, and it has no Windows support — auto-upgrading to it would
+// silently replace a working install with one that exits on startup. So the update
+// check reads this repo's GitHub releases and only ever prints what to run; it
+// installs nothing.
 const CURRENT_VERSION: string = pkg.version;
-const PACKAGE_NAME: string = pkg.name;
-const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}`;
+const REPO = "TheFishEngineer/claude-share-Windows";
+const LATEST_RELEASE_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
+const UPDATE_COMMAND = "git pull && bun run build";
 const CONFIG_FILE = path.join(os.homedir(), ".claude-share", "config.json");
 
 // ── Config helpers ────────────────────────────────────────────────────────────
@@ -97,41 +102,37 @@ function isNewer(latest: string, current: string): boolean {
 
 // ── Background version fetch ──────────────────────────────────────────────────
 
-function latestPublishedVersion(json: Record<string, unknown>): string | null {
-  // Prefer dist-tags.latest — npm's authoritative "current" tag.
-  const distTags = json["dist-tags"] as Record<string, string> | undefined;
-  if (distTags?.["latest"]) return distTags["latest"];
-
-  // Fall back: highest stable version, then highest pre-release.
-  const versions = (json["versions"] ?? {}) as Record<string, unknown>;
-  const all = Object.keys(versions);
-  if (all.length === 0) return null;
-  const stable = all.filter((v) => !v.includes("-"));
-  const pool = stable.length > 0 ? stable : all;
-  return pool.reduce((best, v) => (isNewer(v, best) ? v : best), pool[0]!);
+/**
+ * Latest release tag of the fork, or null when there is nothing to compare:
+ * no releases published yet (404), offline, rate-limited, malformed response.
+ * Never throws — every caller treats null as "no update".
+ */
+async function fetchLatestRelease(timeoutMs: number): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(LATEST_RELEASE_URL, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": `claude-share/${CURRENT_VERSION}`,
+      },
+    });
+    if (!res.ok) return null;
+    const json = JSON.parse((await res.text()).trim()) as Record<string, unknown>;
+    const tag = json["tag_name"];
+    return typeof tag === "string" && tag.trim() ? tag.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function scheduleVersionCheck(): void {
   void (async () => {
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5_000);
-      let text: string;
-      try {
-        const res = await fetch(REGISTRY_URL, {
-          signal: controller.signal,
-          headers: { Accept: "application/vnd.npm.install-v1+json" },
-        });
-        clearTimeout(timer);
-        if (!res.ok) return;
-        text = (await res.text()).trim();
-      } catch {
-        clearTimeout(timer);
-        return;
-      }
-
-      const json = JSON.parse(text) as Record<string, unknown>;
-      const latest = latestPublishedVersion(json);
+      const latest = await fetchLatestRelease(5_000);
       if (!latest) return;
 
       // Set or clear the flag so the next startup knows what to do
@@ -142,51 +143,17 @@ function scheduleVersionCheck(): void {
 
 // ── Upgrade ───────────────────────────────────────────────────────────────────
 
-async function detectPackageManager(): Promise<string | null> {
-  const candidates = ["bun", "pnpm", "yarn", "npm"];
-  const execPath = process.env["npm_execpath"] ?? "";
-  if (execPath.includes("bun")) candidates.unshift("bun");
-  else if (execPath.includes("pnpm")) candidates.unshift("pnpm");
-  else if (execPath.includes("yarn")) candidates.unshift("yarn");
-
-  for (const pm of new Set(candidates)) {
-    if (await commandExists(pm)) return pm;
-  }
-  return null;
-}
-
-function installArgs(pm: string): [string, string[]] {
-  switch (pm) {
-    case "bun": return ["bun", ["install", "-g", `${PACKAGE_NAME}@latest`]];
-    case "pnpm": return ["pnpm", ["add", "-g", `${PACKAGE_NAME}@latest`]];
-    case "yarn": return ["yarn", ["global", "add", `${PACKAGE_NAME}@latest`]];
-    default: return ["npm", ["install", "-g", `${PACKAGE_NAME}@latest`]];
-  }
-}
-
-async function attemptUpgrade(): Promise<void> {
-  // Clear flag before attempting so a crash/failure doesn't retry every run;
-  // the background check will re-set it next time if still outdated.
+/**
+ * Tell the user how to update. Deliberately runs nothing: the install is a git
+ * clone linked with `npm install -g .`, so updating means pulling and rebuilding in
+ * that folder — a package manager can only get it wrong here.
+ */
+function announceUpdate(latest: string): void {
+  // Clear the flag so the notice shows once per release; the background check
+  // re-sets it if this build is still behind.
   patchConfig({ isUpgradeAvailable: false });
-
-  const pm = await detectPackageManager();
-  if (!pm) {
-    p.log.info(`Run: npm install -g ${PACKAGE_NAME}@latest`);
-    return;
-  }
-
-  const [cmd, args] = installArgs(pm);
-  const spin = p.spinner();
-  spin.start(`Upgrading via ${pm}…`);
-  try {
-    // execCommand runs the .cmd shims npm/pnpm/yarn install on Windows
-    await execCommand(cmd, args, { timeout: 90_000 });
-    spin.stop("Upgraded successfully. Please restart the CLI.");
-    process.exit(0);
-  } catch (err) {
-    spin.stop(`Auto-upgrade failed: ${(err as Error).message}`);
-    p.log.info(`Run manually: ${cmd} ${args.join(" ")}`);
-  }
+  p.log.warn(`claude-share ${latest} is available (this build: ${CURRENT_VERSION}).`);
+  p.log.info(`Update from your clone with: ${UPDATE_COMMAND}`);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -195,59 +162,42 @@ export async function forceUpgrade(): Promise<void> {
   p.intro("upgrade");
 
   const spin = p.spinner();
-  spin.start("Checking latest version…");
+  spin.start("Checking latest release…");
 
-  let latest: string | null = null;
-  let fetchError: string | null = null;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
-  try {
-    const res = await fetch(REGISTRY_URL, {
-      signal: controller.signal,
-      headers: { Accept: "application/vnd.npm.install-v1+json" },
-    });
-    clearTimeout(timer);
-    if (res.ok) {
-      const json = JSON.parse((await res.text()).trim()) as Record<string, unknown>;
-      latest = latestPublishedVersion(json);
-      if (!latest) fetchError = "No versions found in registry.";
-    } else {
-      fetchError = `Registry returned HTTP ${res.status}`;
-    }
-  } catch (err) {
-    clearTimeout(timer);
-    fetchError = (err as Error).message ?? String(err);
-  }
+  const latest = await fetchLatestRelease(10_000);
 
   if (!latest) {
-    spin.stop(`Could not check for updates: ${fetchError}`);
-    p.log.info(`Run manually: npm install -g ${PACKAGE_NAME}@latest`);
-    process.exit(1);
+    spin.stop(`No release found for ${REPO} (or it could not be reached).`);
+    p.log.info(`Update from your clone with: ${UPDATE_COMMAND}`);
+    p.outro("");
+    process.exit(0);
   }
 
   if (!isNewer(latest, CURRENT_VERSION)) {
-    spin.stop(`Already on the latest version (${CURRENT_VERSION}).`);
+    spin.stop(`Already up to date (${CURRENT_VERSION}).`);
     p.outro("Nothing to upgrade.");
     process.exit(0);
   }
 
-  spin.stop(`New version available: ${latest} (current: ${CURRENT_VERSION})`);
-  await attemptUpgrade();
+  spin.stop(`New release available: ${latest} (this build: ${CURRENT_VERSION})`);
+  p.log.info(`Update from your clone with: ${UPDATE_COMMAND}`);
+  p.outro("");
+  process.exit(0);
 }
 
 /**
  * Call once at CLI startup.
  *
- * Phase 1 (sync): reads config — if isUpgradeAvailable is true, upgrades now.
- * Phase 2 (async): fires a background version fetch; writes the flag for next run.
- * All errors are swallowed — this must never crash the caller.
+ * Phase 1 (sync): reads config — if isUpgradeAvailable is true, prints how to update.
+ * Phase 2 (async): fires a background release fetch; writes the flag for next run.
+ * All errors are swallowed — this never crashes the caller, and it never installs.
  */
 export async function checkForUpdate(): Promise<void> {
   try {
     if (readConfig()["isUpgradeAvailable"] === true) {
-      p.log.warn(`A newer version of ${PACKAGE_NAME} is available. Upgrading…`);
-      await attemptUpgrade();
+      const latest = await fetchLatestRelease(3_000);
+      if (latest && isNewer(latest, CURRENT_VERSION)) announceUpdate(latest);
+      else patchConfig({ isUpgradeAvailable: false });
     }
   } catch {}
 

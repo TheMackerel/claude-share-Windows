@@ -35,6 +35,10 @@ Build: `bun run build` (compiles both via bun build). Lint: `bun run lint`.
 - `INTERCEPT_DOMAINS` must stay minimal — non-Anthropic traffic must bypass the MITM
 - Blocked on `api.anthropic.com`: `/v1/files`, `/v1/fine_tuning`, `/v1/assistants`
 - Rate limit: 5 attempts per known IP, 20 for `"unknown"` (bore doesn't forward real IPs)
+- `shared/checkVersion.ts` must never install anything. This fork ships from source, and `pkg.name`
+  resolves to upstream's npm package, which has no Windows support — an auto-upgrade would replace a
+  working install with one that exits on startup. Check this repo's GitHub releases, print
+  `git pull && bun run build`, install nothing.
 
 ## Receiver saved state
 

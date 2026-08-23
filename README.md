@@ -88,10 +88,10 @@ bun install
 bun run build
 ```
 
-> **Heads up:** at startup both commands check npm for a newer `@0xpv/claude-share` and auto-upgrade to
-> it — which would replace this Windows build with the upstream package that has no Windows support.
-> npm's latest (`1.3.2`) currently matches this fork, so nothing happens; if it ever does, reinstall with
-> `npm install -g .` from this folder.
+Both commands check this repo's GitHub releases at startup and print that command when a newer release
+exists. They never install anything themselves and never look at npm — upstream's npm package has no
+Windows support, so auto-upgrading to it would break the install. `claude-share --upgrade` (or
+`claude-connect --upgrade`) runs the same check on demand.
 
 ---
 
