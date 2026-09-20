@@ -4,7 +4,7 @@ import path from "node:path";
 
 import * as p from "@clack/prompts";
 
-import { commandExists, IS_WINDOWS, killTree, spawnCommand } from "@shared/exec";
+import { childEnv, commandExists, IS_WINDOWS, killTree, spawnCommand } from "@shared/exec";
 import { platform } from "@shared/platforms";
 import { apiFetch } from "./fetch";
 import { logger } from "./logger";
@@ -75,6 +75,21 @@ export async function checkClaudeInstalled(): Promise<boolean> {
   return commandExists("claude");
 }
 
+/** Contents of the CA bundle already in NODE_EXTRA_CA_CERTS, or "" if there is none. */
+function readExistingCaBundle(): string {
+  const existing = process.env["NODE_EXTRA_CA_CERTS"];
+  if (!existing) return "";
+  try {
+    return fs.readFileSync(existing, "utf8");
+  } catch (err) {
+    logger.warn("Could not read the existing NODE_EXTRA_CA_CERTS bundle", {
+      path: existing,
+      err,
+    });
+    return "";
+  }
+}
+
 export async function sessionPost(
   serverUrl: string,
   endpoint: string,
@@ -125,8 +140,13 @@ export async function launchClaude(
     );
   }
 
+  // NODE_EXTRA_CA_CERTS names a single file, so replacing a bundle the machine
+  // already relies on — an antivirus web shield, a corporate root — would drop
+  // its trust for everything claude talks to. Carry both instead.
   const tmpCert = path.join(os.tmpdir(), `claude-share-ca-${Date.now()}.pem`);
-  fs.writeFileSync(tmpCert, caPem, { mode: 0o600 });
+  fs.writeFileSync(tmpCert, `${caPem.trimEnd()}\n${readExistingCaBundle()}`, {
+    mode: 0o600,
+  });
 
   const proxyAuth =
     "Basic " +
@@ -184,14 +204,13 @@ export async function launchClaude(
   // spawnCommand resolves the .cmd shim npm installs on Windows
   const child = await spawnCommand("claude", claudeArgs, {
     stdio: "inherit",
-    env: {
-      ...process.env,
+    env: childEnv({
       HTTPS_PROXY: httpProxyUrl,
       HTTP_PROXY: httpProxyUrl,
       NODE_EXTRA_CA_CERTS: tmpCert,
       SSL_CERT_FILE: tmpCert,
       CURL_CA_BUNDLE: tmpCert,
-    },
+    }),
   });
 
   async function cleanupAndExit(code: number | null) {

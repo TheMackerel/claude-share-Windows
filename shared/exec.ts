@@ -112,6 +112,25 @@ export async function resolveCommand(
 
 // ── Spawning ──────────────────────────────────────────────────────────────────
 
+/**
+ * The current environment with overrides applied, for handing to a child.
+ *
+ * Windows matches variable names case-insensitively, but a spread of
+ * process.env is an ordinary object that does not: an override whose casing
+ * differs from the inherited name leaves both entries in the block, and the
+ * child reads whichever one it finds first.
+ */
+export function childEnv(overrides: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (IS_WINDOWS) {
+    const overridden = new Set(Object.keys(overrides).map((k) => k.toLowerCase()));
+    for (const name of Object.keys(env)) {
+      if (overridden.has(name.toLowerCase())) delete env[name];
+    }
+  }
+  return { ...env, ...overrides };
+}
+
 /** spawn() that also works for Windows batch shims. */
 export async function spawnCommand(
   command: string,
