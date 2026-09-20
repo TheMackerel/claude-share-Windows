@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess, ExecFileOptions, SpawnOptions } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -8,16 +9,26 @@ export const IS_WINDOWS = process.platform === "win32";
 
 // ── Lookup ────────────────────────────────────────────────────────────────────
 
+// The only extensions CreateProcess can start, directly or through the cmd.exe
+// wrapper below. npm drops three files side by side — an extensionless shell
+// script for Git Bash, a .cmd and a .ps1 — and `where` lists the extensionless
+// one first, which spawns as ENOENT.
+const WINDOWS_EXECUTABLE_EXTS = new Set([".exe", ".com", ".bat", ".cmd"]);
+
 /** Absolute path of an executable in PATH, or null. `which` on POSIX, `where` on Windows. */
 export async function which(command: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(IS_WINDOWS ? "where" : "which", [command]);
-    // `where` can return several matches (claude.cmd, claude.ps1, …) — take the first
-    const first = stdout
+    const matches = stdout
       .split(/\r?\n/)
       .map((l) => l.trim())
-      .filter(Boolean)[0];
-    return first ?? null;
+      .filter(Boolean);
+    if (!IS_WINDOWS) return matches[0] ?? null;
+
+    const runnable = matches.find((m) =>
+      WINDOWS_EXECUTABLE_EXTS.has(path.extname(m).toLowerCase()),
+    );
+    return runnable ?? matches[0] ?? null;
   } catch {
     return null;
   }
