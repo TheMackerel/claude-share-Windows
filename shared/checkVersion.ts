@@ -11,7 +11,7 @@ import pkg from "../package.json";
 // check reads this repo's GitHub releases and only ever prints what to run; it
 // installs nothing.
 const CURRENT_VERSION: string = pkg.version;
-const REPO = "TheFishEngineer/claude-share-Windows";
+const REPO = "TheMackerel/claude-share-Windows";
 const LATEST_RELEASE_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 const UPDATE_COMMAND = "git pull && bun run build";
 const CONFIG_FILE = path.join(os.homedir(), ".claude-share", "config.json");

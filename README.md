@@ -40,7 +40,6 @@ package instead, which exits with `Unsupported platform: "win32"`. Build from so
 ```powershell
 git clone https://github.com/TheMackerel/claude-share-Windows.git
 cd claude-share-Windows
-git checkout claude/funny-curie-kkdztf
 npm install -g bun      # skip if bun is already installed
 bun install
 bun run build
@@ -52,15 +51,11 @@ npm install -g .
 ```bash
 git clone https://github.com/TheMackerel/claude-share-Windows.git
 cd claude-share-Windows
-git checkout claude/funny-curie-kkdztf
 npm install -g bun      # skip if bun is already installed
 bun install
 bun run build
 npm install -g .
 ```
-
-Don't skip the `git checkout`: a fresh clone starts on `main`, which doesn't have the relay, so on
-Windows the receiver still fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
 
 That puts both `claude-share` and `claude-connect` on your PATH. Verify:
 
@@ -74,7 +69,7 @@ Both should print `1.3.2`.
 ### Things to know
 
 - `npm install -g .` **links** the commands to this folder — don't move or delete the clone, and stay
-  on the branch above. After `git pull`, `bun run build` is enough; there's no need to re-run
+  on `main`. After `git pull`, `bun run build` is enough; there's no need to re-run
   `npm install -g .`.
 - Windows: npm also creates `.ps1` shims. If PowerShell answers *"running scripts is disabled on this
   system"*, either call `claude-share.cmd` / `claude-connect.cmd`, or allow local scripts once with
@@ -90,13 +85,13 @@ Both should print `1.3.2`.
 ## Updating
 
 ```bash
-git pull origin claude/funny-curie-kkdztf
+git pull
 bun install
 bun run build
 ```
 
-Use `git pull`, not `git checkout`: when the branch already exists locally, checking it out does
-nothing, `git fetch` only moves `origin/<branch>`, and you keep running the old code.
+Use `git pull`, not `git fetch` or `git checkout`: `fetch` only moves `origin/main`, and checking out
+a branch you are already on does nothing, so either one leaves you rebuilding the same old code.
 
 **If you share, restart `claude-share` afterwards.** A running process keeps the build it started
 with, so a rebuild alone changes nothing for the people connecting to you.
