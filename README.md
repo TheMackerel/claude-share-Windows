@@ -23,8 +23,9 @@ claude (CLI)                        claude-share
                                       └─ bore tunnel (public URL via bore.pub)
 ```
 
-- The sharer's OAuth token is read from the platform credential store and injected per-request inside the MITM proxy — it is never written to disk or sent to the receiver.
-- The receiver installs a temporary CA cert (valid only for the session) so the MITM can intercept Anthropic traffic. Non-Anthropic domains pass through as an opaque TCP tunnel — never inspected.
+- The sharer's OAuth token is read from the platform credential store and injected per-request — it is never written to disk or sent to the receiver.
+- By default the receiver reaches the API through the sharer's relay endpoint: `claude` talks to a loopback address on the receiver's own machine, which forwards over TLS to the sharer. No certificate has to be installed or trusted anywhere.
+- When the sharer runs an older version, the receiver falls back to the original proxy mode: a temporary session CA cert lets the MITM intercept Anthropic traffic, while non-Anthropic domains pass through as an opaque TCP tunnel, never inspected. On Windows this mode does not work with Claude Code's native build, which ignores `NODE_EXTRA_CA_CERTS` — update both sides to use the relay instead.
 - Pairing uses a one-time code. Once paired, credentials are saved so reconnecting skips the pairing step.
 
 ---
@@ -73,8 +74,9 @@ Both should print `1.3.2`.
 - Windows: npm also creates `.ps1` shims. If PowerShell answers *"running scripts is disabled on this
   system"*, either call `claude-share.cmd` / `claude-connect.cmd`, or allow local scripts once with
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-- Windows: no administrator rights are needed. The session CA cert is written to a temp file and handed
-  to `claude` through `NODE_EXTRA_CA_CERTS` — nothing is added to the Windows certificate store.
+- Windows: no administrator rights are needed, and nothing is ever added to the Windows certificate
+  store. The relay exists so the receiver needs no certificate trust at all; only the fallback proxy
+  mode hands the session CA to `claude` through `NODE_EXTRA_CA_CERTS`.
 - Windows, sharer only: Defender may prompt to unblock the listening port, and SmartScreen may flag the
   automatic `bore` download from GitHub.
 

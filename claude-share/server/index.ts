@@ -1,5 +1,13 @@
+import https from "node:https";
+import type { IncomingMessage } from "node:http";
+import { Readable } from "node:stream";
+
 import { Hono } from "hono";
 
+import { logger } from "../logger";
+import { API_HOST, isApiAllowed } from "../proxy/policy";
+import { logRequest, setResponseStatus } from "../proxy/requestLog";
+import { getAccessToken } from "../proxy/token";
 import {
   getSession,
   checkPairingCode,
@@ -17,6 +25,53 @@ import {
 interface Urls {
   public: string | null;
   lan: string | null;
+}
+
+// Dropped on the way out: hop-by-hop, the receiver's proxy credentials, and
+// anything that would pin the body's original framing.
+const SKIP_REQUEST_HEADERS = new Set([
+  "host",
+  "connection",
+  "proxy-authorization",
+  "content-length",
+  "transfer-encoding",
+  "x-forwarded-for",
+  "x-real-ip",
+]);
+
+// Dropped on the way back: anything that could leak the sharer's identity, plus
+// framing headers the re-sent response sets for itself.
+const SKIP_RESPONSE_HEADERS = new Set([
+  "authorization",
+  "set-cookie",
+  "x-api-key",
+  "anthropic-organization-id",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+]);
+
+/** Sends one request on to the Anthropic API, streaming the body through. */
+function forwardToApi(
+  method: string,
+  pathWithQuery: string,
+  headers: Record<string, string>,
+  body: ReadableStream<Uint8Array> | null,
+): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: API_HOST, port: 443, path: pathWithQuery, method, headers },
+      resolve,
+    );
+    req.on("error", reject);
+    if (body) {
+      Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0])
+        .on("error", reject)
+        .pipe(req);
+    } else {
+      req.end();
+    }
+  });
 }
 
 export function createApiApp(
@@ -46,6 +101,91 @@ export function createApiApp(
       ok: true,
       sessionActive: !!session && !isSessionExpired(session),
       sessionId: session?.id ?? null,
+      // Tells a receiver it can point ANTHROPIC_BASE_URL at /relay instead of
+      // routing claude through the MITM proxy. Absent on older sharers.
+      relay: true,
+    });
+  });
+
+  /**
+   * ALL /relay/* — forwards an Anthropic API call with the sharer's token.
+   *
+   * Same job as the MITM proxy, minus the interception: the receiver reaches
+   * this over ordinary TLS, so its claude never has to trust a generated CA.
+   * Responses stream straight through, which SSE depends on.
+   */
+  app.all("/relay/*", async (c) => {
+    const url = new URL(c.req.url);
+    const reqPath = url.pathname.slice("/relay".length);
+    const method = c.req.method;
+
+    if (!isApiAllowed(method, reqPath)) {
+      logRequest(method, API_HOST, reqPath, "blocked");
+      return c.text("Not allowed by claude-share policy", 403);
+    }
+
+    const logId = logRequest(method, API_HOST, reqPath, "allowed");
+
+    const headers: Record<string, string> = {};
+    for (const [name, value] of c.req.raw.headers) {
+      if (SKIP_REQUEST_HEADERS.has(name)) continue;
+      headers[name] = value;
+    }
+    headers["host"] = API_HOST;
+    headers["authorization"] = `Bearer ${getAccessToken()}`;
+
+    let upstream: IncomingMessage;
+    try {
+      upstream = await forwardToApi(
+        method,
+        `${reqPath}${url.search}`,
+        headers,
+        c.req.raw.body,
+      );
+    } catch (err) {
+      logger.error("[relay] upstream request failed", err);
+      setResponseStatus(logId, 502);
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "api_error",
+            message: "[claude-share] The sharer could not reach Anthropic.",
+          },
+        },
+        502,
+      );
+    }
+
+    const status = upstream.statusCode ?? 502;
+    setResponseStatus(logId, status);
+
+    // A 401 means the sharer's own token is invalid or expired — say so instead
+    // of letting it read as a receiver-side credentials problem.
+    if (status === 401) {
+      upstream.resume();
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "authentication_error",
+            message:
+              "[claude-share] The sharer's Anthropic token is invalid or expired. ",
+          },
+        },
+        401,
+      );
+    }
+
+    const respHeaders = new Headers();
+    for (const [name, value] of Object.entries(upstream.headers)) {
+      if (SKIP_RESPONSE_HEADERS.has(name) || value === undefined) continue;
+      respHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+    }
+
+    return new Response(Readable.toWeb(upstream) as ReadableStream, {
+      status,
+      headers: respHeaders,
     });
   });
 

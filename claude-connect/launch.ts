@@ -8,6 +8,7 @@ import { childEnv, commandExists, IS_WINDOWS, killTree, spawnCommand } from "@sh
 import { platform } from "@shared/platforms";
 import { apiFetch } from "./fetch";
 import { logger } from "./logger";
+import { startRelay } from "./relay";
 import type { SharerAccount } from "./types";
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
@@ -75,6 +76,39 @@ export async function checkClaudeInstalled(): Promise<boolean> {
   return commandExists("claude");
 }
 
+/** Whether this sharer exposes /relay. Older ones don't, and take the proxy path. */
+async function sharerOffersRelay(
+  serverUrl: string,
+  caPem: string,
+): Promise<boolean> {
+  try {
+    const res = await apiFetch(`${serverUrl}/health`, {
+      ca: caPem,
+      timeout: 5_000,
+    });
+    if (!res.ok) return false;
+    return ((await res.json()) as { relay?: boolean }).relay === true;
+  } catch (err) {
+    logger.warn("Could not read /health — taking the proxy path", err);
+    return false;
+  }
+}
+
+/** NO_PROXY with the loopback names added, so a proxy in the environment
+ * cannot swallow claude's calls to the local relay. */
+function noProxyWithLoopback(): string {
+  const existing =
+    process.env["NO_PROXY"] ?? process.env["no_proxy"] ?? "";
+  const entries = existing
+    .split(",")
+    .map((e) => e.trim())
+    .filter(Boolean);
+  for (const host of ["localhost", "127.0.0.1"]) {
+    if (!entries.includes(host)) entries.push(host);
+  }
+  return entries.join(",");
+}
+
 /** Contents of the CA bundle already in NODE_EXTRA_CA_CERTS, or "" if there is none. */
 function readExistingCaBundle(): string {
   const existing = process.env["NODE_EXTRA_CA_CERTS"];
@@ -140,17 +174,53 @@ export async function launchClaude(
     );
   }
 
-  // NODE_EXTRA_CA_CERTS names a single file, so replacing a bundle the machine
-  // already relies on — an antivirus web shield, a corporate root — would drop
-  // its trust for everything claude talks to. Carry both instead.
-  const tmpCert = path.join(os.tmpdir(), `claude-share-ca-${Date.now()}.pem`);
-  fs.writeFileSync(tmpCert, `${caPem.trimEnd()}\n${readExistingCaBundle()}`, {
-    mode: 0o600,
-  });
-
   const proxyAuth =
     "Basic " +
     Buffer.from(`${meta.proxyUser}:${meta.proxyPass}`).toString("base64");
+
+  // Preferred path: the sharer forwards API calls itself, so claude reaches a
+  // loopback address in plain HTTP and never has to trust the session CA. The
+  // proxy path below needs NODE_EXTRA_CA_CERTS, which Claude Code's native
+  // Windows build ignores.
+  const relay = (await sharerOffersRelay(proxyUrl, caPem))
+    ? await startRelay(proxyUrl, caPem, proxyAuth)
+    : null;
+
+  let tmpCert: string | null = null;
+  let claudeEnv: Record<string, string>;
+
+  if (relay) {
+    p.log.info("Connected through the sharer's relay.");
+    claudeEnv = {
+      ANTHROPIC_BASE_URL: relay.url,
+      NO_PROXY: noProxyWithLoopback(),
+    };
+  } else {
+    p.log.info("Sharer is on an older version — using proxy mode.");
+    // NODE_EXTRA_CA_CERTS names a single file, so replacing a bundle the machine
+    // already relies on — an antivirus web shield, a corporate root — would drop
+    // its trust for everything claude talks to. Carry both instead.
+    tmpCert = path.join(os.tmpdir(), `claude-share-ca-${Date.now()}.pem`);
+    fs.writeFileSync(tmpCert, `${caPem.trimEnd()}\n${readExistingCaBundle()}`, {
+      mode: 0o600,
+    });
+
+    // Proxy URL keeps https:// — the TLS terminator on the sharer routes CONNECT
+    // requests to the MITM proxy after decryption, so the outer connection is
+    // encrypted and proxy credentials are never sent in cleartext over the network.
+    const parsedProxy = new URL(proxyUrl);
+    parsedProxy.username = encodeURIComponent(meta.proxyUser);
+    parsedProxy.password = encodeURIComponent(meta.proxyPass);
+    const httpProxyUrl = parsedProxy.toString();
+
+    claudeEnv = {
+      HTTPS_PROXY: httpProxyUrl,
+      HTTP_PROXY: httpProxyUrl,
+      NODE_EXTRA_CA_CERTS: tmpCert,
+      SSL_CERT_FILE: tmpCert,
+      CURL_CA_BUNDLE: tmpCert,
+    };
+  }
 
   // Register this Claude session with the sharer
   let sessionId: string | null = null;
@@ -193,25 +263,19 @@ export async function launchClaude(
 
   const startTime = Date.now();
 
-  // Proxy URL keeps https:// — the TLS terminator on the sharer routes CONNECT
-  // requests to the MITM proxy after decryption, so the outer connection is
-  // encrypted and proxy credentials are never sent in cleartext over the network.
-  const parsedProxy = new URL(proxyUrl);
-  parsedProxy.username = encodeURIComponent(meta.proxyUser);
-  parsedProxy.password = encodeURIComponent(meta.proxyPass);
-  const httpProxyUrl = parsedProxy.toString();
-
   // spawnCommand resolves the .cmd shim npm installs on Windows
   const child = await spawnCommand("claude", claudeArgs, {
     stdio: "inherit",
-    env: childEnv({
-      HTTPS_PROXY: httpProxyUrl,
-      HTTP_PROXY: httpProxyUrl,
-      NODE_EXTRA_CA_CERTS: tmpCert,
-      SSL_CERT_FILE: tmpCert,
-      CURL_CA_BUNDLE: tmpCert,
-    }),
+    env: childEnv(claudeEnv),
   });
+
+  function releaseResources() {
+    relay?.close();
+    if (!tmpCert) return;
+    try {
+      fs.unlinkSync(tmpCert);
+    } catch {}
+  }
 
   async function cleanupAndExit(code: number | null) {
     if (heartbeat) clearInterval(heartbeat);
@@ -224,9 +288,7 @@ export async function launchClaude(
         proxyAuth,
       ).catch(() => {});
     }
-    try {
-      fs.unlinkSync(tmpCert);
-    } catch {}
+    releaseResources();
     const duration = Math.floor((Date.now() - startTime) / 1000);
     const mins = Math.floor(duration / 60);
     const secs = duration % 60;
@@ -254,9 +316,7 @@ export async function launchClaude(
         proxyAuth,
       ).catch(() => {});
     }
-    try {
-      fs.unlinkSync(tmpCert);
-    } catch {}
+    releaseResources();
     process.exit(1);
   });
 
